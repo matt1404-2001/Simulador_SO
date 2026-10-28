@@ -2,29 +2,163 @@
 
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import streamlit as st
 
-from simulador.dominio.enumeraciones import Servicio
-from simulador.dominio.excepciones import ErrorValidacion
-from simulador.dominio.modelos import Cliente, Proceso
-from simulador.dominio.reglas import derivar_cola, derivar_prioridad
+from simulador.aplicacion.comparar import Comparacion
+from simulador.dominio.enumeraciones import Algoritmo, Servicio, TipoCliente
+from simulador.dominio.excepciones import ErrorConfiguracion, ErrorValidacion
+from simulador.dominio.modelos import (
+    Cliente,
+    ConfiguracionCola,
+    Proceso,
+    ResultadoSimulacion,
+)
+from simulador.dominio.reglas import REGLAS_TIPO_CLIENTE, derivar_cola, derivar_prioridad
 
 CLAVE_ESTADO_SESION = "estado_simulador"
+
+# Las cuatro colas fijas se derivan de la prioridad del cliente y conservan esos
+# identificadores en todo el sistema; la interfaz solo edita su comportamiento.
+NOMBRES_COLA = MappingProxyType(
+    {"alta": "Alta", "media": "Media", "normal": "Normal", "baja": "Baja"}
+)
+QUANTUM_COMPARACION_POR_DEFECTO = 2
+
+
+@dataclass(frozen=True, slots=True)
+class ColaEditable:
+    """Valores que la interfaz captura antes de construir una cola MLQ.
+
+    El nombre y los tipos de cliente no se editan: se derivan de `reglas.py` para
+    que la configuración no contradiga la cola asignada a cada proceso.
+    """
+
+    id_cola: str
+    prioridad_cola: int
+    algoritmo: Algoritmo
+    quantum: int | None = None
+
+
+def tipos_cliente_de_cola(id_cola: str) -> tuple[TipoCliente, ...]:
+    """Devuelve los tipos de cliente que el dominio envía a esa cola."""
+
+    return tuple(tipo for tipo, regla in REGLAS_TIPO_CLIENTE.items() if regla.id_cola == id_cola)
+
+
+def construir_colas(especificaciones: Iterable[ColaEditable]) -> tuple[ConfiguracionCola, ...]:
+    """Construye la configuración MLQ a partir de los valores de la interfaz.
+
+    Exige un quantum entero positivo únicamente en las colas Round Robin y
+    rechaza que un tipo de cliente quede asignado a dos colas, porque la cola de
+    cada proceso se deriva de su tipo.
+    """
+
+    recibidas = tuple(especificaciones)
+    if not recibidas:
+        raise ErrorConfiguracion("la configuración de colas está vacía")
+    if any(not isinstance(especificacion, ColaEditable) for especificacion in recibidas):
+        raise ErrorConfiguracion("la configuración contiene una cola inválida")
+
+    identificadores = [especificacion.id_cola for especificacion in recibidas]
+    if len(set(identificadores)) != len(identificadores):
+        raise ErrorConfiguracion("la configuración contiene colas duplicadas")
+
+    colas: list[ConfiguracionCola] = []
+    for especificacion in recibidas:
+        nombre = NOMBRES_COLA.get(especificacion.id_cola)
+        if nombre is None:
+            raise ErrorConfiguracion(
+                f"la cola {especificacion.id_cola} no está definida en el sistema"
+            )
+        if not isinstance(especificacion.algoritmo, Algoritmo):
+            raise ErrorConfiguracion("cada cola debe tener un algoritmo válido")
+        colas.append(
+            ConfiguracionCola(
+                id_cola=especificacion.id_cola,
+                nombre=nombre,
+                prioridad_cola=especificacion.prioridad_cola,
+                algoritmo=especificacion.algoritmo,
+                quantum=_validar_quantum(especificacion),
+                tipos_cliente=tipos_cliente_de_cola(especificacion.id_cola),
+            )
+        )
+
+    _validar_tipos_unicos(colas)
+    return tuple(colas)
+
+
+def configuracion_por_defecto() -> tuple[ConfiguracionCola, ...]:
+    """Reproduce la configuración MLQ de demostración documentada."""
+
+    return construir_colas(
+        (
+            ColaEditable("alta", 1, Algoritmo.ROUND_ROBIN, 2),
+            ColaEditable("media", 2, Algoritmo.SJF),
+            ColaEditable("normal", 3, Algoritmo.FIFO),
+            ColaEditable("baja", 4, Algoritmo.FIFO),
+        )
+    )
+
+
+def _validar_quantum(especificacion: ColaEditable) -> int | None:
+    """Acepta quantum solo en Round Robin y exige un entero positivo."""
+
+    nombre = NOMBRES_COLA[especificacion.id_cola]
+    if especificacion.algoritmo is not Algoritmo.ROUND_ROBIN:
+        if especificacion.quantum is not None:
+            raise ErrorConfiguracion(f"la cola {nombre} no usa Round Robin y no admite quantum")
+        return None
+
+    quantum = especificacion.quantum
+    if quantum is None:
+        raise ErrorConfiguracion(f"la cola {nombre} usa Round Robin y requiere quantum")
+    if isinstance(quantum, bool) or not isinstance(quantum, int) or quantum < 1:
+        raise ErrorConfiguracion(
+            f"el quantum de la cola {nombre} debe ser un número entero mayor o igual que 1"
+        )
+    return quantum
+
+
+def _validar_tipos_unicos(colas: Iterable[ConfiguracionCola]) -> None:
+    """Rechaza que un tipo de cliente aparezca en más de una cola."""
+
+    asignaciones: dict[TipoCliente, str] = {}
+    for cola in colas:
+        for tipo in cola.tipos_cliente:
+            anterior = asignaciones.get(tipo)
+            if anterior is not None:
+                raise ErrorConfiguracion(
+                    f"el tipo de cliente {tipo.value} aparece en las colas "
+                    f"{anterior} y {cola.id_cola}"
+                )
+            asignaciones[tipo] = cola.id_cola
 
 
 @dataclass(slots=True)
 class EstadoSesion:
-    """Carga editable compuesta por catálogo, procesos y cantidad N.
+    """Carga, configuración y resultados vigentes de la sesión.
 
     La clase no depende del navegador ni de un contexto de ejecución de
     Streamlit: la interfaz la obtiene de `st.session_state` mediante
     `obtener_estado` y las pruebas pueden instanciarla directamente.
+
+    Cualquier cambio del catálogo, de la carga o de la configuración descarta los
+    resultados anteriores. Cambiar `N` no los descarta porque no altera los
+    procesos que se planifican.
     """
 
     clientes: tuple[Cliente, ...] = ()
     procesos: list[Proceso] = field(default_factory=list)
     cantidad_solicitada: int | None = None
+    configuracion_colas: tuple[ConfiguracionCola, ...] = field(
+        default_factory=configuracion_por_defecto
+    )
+    quantum_comparacion: int = QUANTUM_COMPARACION_POR_DEFECTO
+    resultado_individual: ResultadoSimulacion | None = None
+    resultado_mlq: ResultadoSimulacion | None = None
+    comparacion: Comparacion | None = None
 
     def cargar_catalogo(self, clientes: Iterable[Cliente]) -> None:
         """Reemplaza el catálogo de clientes registrados.
@@ -49,6 +183,7 @@ class EstadoSesion:
                 + "; reinicie la carga antes de cambiar el catálogo"
             )
         self.clientes = catalogo
+        self._invalidar_resultados()
 
     def importar_procesos(self, procesos: Iterable[Proceso]) -> None:
         """Reemplaza la carga con los procesos recibidos, ya validados."""
@@ -58,6 +193,7 @@ class EstadoSesion:
         for proceso in cargados:
             self._validar_proceso(proceso)
         self.procesos = cargados
+        self._invalidar_resultados()
 
     def agregar_proceso(
         self,
@@ -88,6 +224,7 @@ class EstadoSesion:
             orden_ingreso=self._siguiente_orden_ingreso(),
         )
         self.procesos.append(proceso)
+        self._invalidar_resultados()
         return proceso
 
     def editar_proceso(
@@ -114,12 +251,14 @@ class EstadoSesion:
             orden_ingreso=anterior.orden_ingreso,
         )
         self.procesos[posicion] = actualizado
+        self._invalidar_resultados()
         return actualizado
 
     def eliminar_proceso(self, id_proceso: str) -> None:
         """Quita un proceso de la carga."""
 
         del self.procesos[self._posicion(id_proceso)]
+        self._invalidar_resultados()
 
     def establecer_cantidad_solicitada(self, cantidad: int | None) -> None:
         """Registra la cantidad N indicada por el usuario."""
@@ -146,11 +285,81 @@ class EstadoSesion:
             )
         return self.cantidad_solicitada
 
+    def establecer_configuracion(
+        self, colas: Iterable[ConfiguracionCola]
+    ) -> tuple[ConfiguracionCola, ...]:
+        """Reemplaza la configuración MLQ e invalida los resultados vigentes.
+
+        Exige colas conocidas, sin identificadores repetidos, sin tipos de cliente
+        compartidos y con una cola para cada proceso de la carga.
+        """
+
+        configuracion = tuple(colas)
+        if not configuracion:
+            raise ErrorConfiguracion("la configuración de colas está vacía")
+        if any(not isinstance(cola, ConfiguracionCola) for cola in configuracion):
+            raise ErrorConfiguracion("la configuración contiene una cola inválida")
+
+        identificadores = [cola.id_cola for cola in configuracion]
+        if len(set(identificadores)) != len(identificadores):
+            raise ErrorConfiguracion("la configuración contiene colas duplicadas")
+        for cola in configuracion:
+            if cola.id_cola not in NOMBRES_COLA:
+                raise ErrorConfiguracion(f"la cola {cola.id_cola} no está definida en el sistema")
+
+        _validar_tipos_unicos(configuracion)
+
+        colas_configuradas = set(identificadores)
+        faltantes = sorted({proceso.id_cola for proceso in self.procesos} - colas_configuradas)
+        if faltantes:
+            raise ErrorConfiguracion(
+                "la configuración no incluye las colas de la carga: " + ", ".join(faltantes)
+            )
+
+        self.configuracion_colas = configuracion
+        self._invalidar_resultados()
+        return configuracion
+
+    def establecer_quantum_comparacion(self, quantum: int) -> int:
+        """Registra el quantum de la comparación y descarta la comparación previa."""
+
+        if isinstance(quantum, bool) or not isinstance(quantum, int):
+            raise ErrorValidacion("el quantum de la comparación debe ser un número entero")
+        if quantum < 1:
+            raise ErrorValidacion("el quantum de la comparación debe ser mayor o igual que 1")
+        if quantum != self.quantum_comparacion:
+            self.quantum_comparacion = quantum
+            self.comparacion = None
+        return quantum
+
+    def registrar_resultado_individual(self, resultado: ResultadoSimulacion) -> None:
+        """Conserva el último resultado de FIFO, SJF o Round Robin."""
+
+        if not isinstance(resultado, ResultadoSimulacion):
+            raise ErrorValidacion("el resultado individual debe ser una simulación válida")
+        self.resultado_individual = resultado
+
+    def registrar_resultado_mlq(self, resultado: ResultadoSimulacion) -> None:
+        """Conserva el último resultado de la configuración MLQ."""
+
+        if not isinstance(resultado, ResultadoSimulacion):
+            raise ErrorValidacion("el resultado MLQ debe ser una simulación válida")
+        self.resultado_mlq = resultado
+
+    def registrar_comparacion(self, comparacion: Comparacion, *, quantum: int) -> None:
+        """Conserva la comparación y el quantum con el que fue calculada."""
+
+        if not isinstance(comparacion, Comparacion):
+            raise ErrorValidacion("la comparación debe ser un resultado válido")
+        self.establecer_quantum_comparacion(quantum)
+        self.comparacion = comparacion
+
     def reiniciar(self) -> None:
-        """Limpia procesos y N; el catálogo de clientes se conserva."""
+        """Limpia procesos, N y resultados; catálogo y configuración se conservan."""
 
         self.procesos.clear()
         self.cantidad_solicitada = None
+        self._invalidar_resultados()
 
     def buscar_proceso(self, id_proceso: str) -> Proceso | None:
         """Devuelve el proceso con ese identificador o `None` si no existe."""
@@ -182,6 +391,13 @@ class EstadoSesion:
         while f"P{numero:03d}" in usados:
             numero += 1
         return f"P{numero:03d}"
+
+    def _invalidar_resultados(self) -> None:
+        """Descarta resultados que dejan de corresponder a la carga o configuración."""
+
+        self.resultado_individual = None
+        self.resultado_mlq = None
+        self.comparacion = None
 
     def _construir_proceso(
         self,

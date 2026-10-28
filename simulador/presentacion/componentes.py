@@ -9,11 +9,27 @@ from typing import Protocol
 import pandas as pd
 import streamlit as st
 
-from simulador.dominio.enumeraciones import Servicio
-from simulador.dominio.excepciones import ErrorValidacion
-from simulador.dominio.modelos import Cliente
+from simulador.aplicacion import comparar_algoritmos, ejecutar_algoritmo
+from simulador.dominio.enumeraciones import Algoritmo, Servicio
+from simulador.dominio.excepciones import ErrorDominio, ErrorValidacion
+from simulador.dominio.modelos import Cliente, ResultadoSimulacion
+from simulador.dominio.reglas import ID_COLA_POR_PRIORIDAD
 from simulador.infraestructura import cargar_clientes, cargar_procesos
-from simulador.presentacion.estado_sesion import EstadoSesion
+from simulador.presentacion.estado_sesion import (
+    NOMBRES_COLA,
+    ColaEditable,
+    EstadoSesion,
+    construir_colas,
+    tipos_cliente_de_cola,
+)
+
+MODALIDADES = ("FIFO", "SJF", "Round Robin", "MLQ", "Comparación")
+ALGORITMOS_POR_MODALIDAD = {
+    "FIFO": Algoritmo.FIFO,
+    "SJF": Algoritmo.SJF,
+    "Round Robin": Algoritmo.ROUND_ROBIN,
+}
+ALGORITMOS_DE_COLA = (Algoritmo.FIFO, Algoritmo.SJF, Algoritmo.ROUND_ROBIN)
 
 RUTA_DATOS = Path(__file__).resolve().parents[2] / "data"
 
@@ -83,9 +99,121 @@ def renderizar_resumen(estado: EstadoSesion) -> None:
 
     st.dataframe(_tabla_procesos(estado), hide_index=True)
     st.caption(
-        "La prioridad y la cola se derivan del tipo de cliente. La configuración de colas y la "
-        "ejecución se incorporan en la siguiente etapa."
+        "La prioridad y la cola se derivan del tipo de cliente. Ajuste la configuración de "
+        "colas y ejecute la simulación en las secciones siguientes."
     )
+
+
+def renderizar_configuracion(estado: EstadoSesion) -> None:
+    """Permite ajustar prioridad, algoritmo y quantum de las colas MLQ."""
+
+    st.header("4. Configuración de colas MLQ")
+    st.caption(
+        "Cada proceso entra a la cola derivada de su tipo de cliente. Menor prioridad se "
+        "atiende primero; si dos colas empatan, se usa el orden en que aparecen."
+    )
+
+    actuales = {cola.id_cola: cola for cola in estado.configuracion_colas}
+    with st.form("formulario_configuracion"):
+        especificaciones: list[ColaEditable] = []
+        for id_cola, nombre in NOMBRES_COLA.items():
+            actual = actuales.get(id_cola)
+            tipos = ", ".join(tipo.value for tipo in tipos_cliente_de_cola(id_cola))
+            st.markdown(f"**Cola {nombre}** - tipos de cliente: {tipos}")
+            columnas = st.columns(3)
+            with columnas[0]:
+                prioridad = st.number_input(
+                    f"Prioridad de la cola {nombre}",
+                    min_value=1,
+                    step=1,
+                    value=actual.prioridad_cola if actual else _prioridad_canonica(id_cola),
+                    key=f"prioridad_{id_cola}",
+                )
+            with columnas[1]:
+                algoritmo = st.selectbox(
+                    f"Algoritmo de la cola {nombre}",
+                    ALGORITMOS_DE_COLA,
+                    index=(ALGORITMOS_DE_COLA.index(actual.algoritmo) if actual else 0),
+                    key=f"algoritmo_{id_cola}",
+                )
+            with columnas[2]:
+                quantum_actual = (
+                    actual.quantum if actual and actual.algoritmo is Algoritmo.ROUND_ROBIN else None
+                )
+                quantum = st.number_input(
+                    f"Quantum de la cola {nombre}",
+                    min_value=1,
+                    step=1,
+                    value=quantum_actual,
+                    key=f"quantum_{id_cola}",
+                    help="Obligatorio solo cuando la cola usa Round Robin.",
+                )
+            especificaciones.append(
+                ColaEditable(
+                    id_cola=id_cola,
+                    prioridad_cola=int(prioridad),
+                    algoritmo=algoritmo,
+                    quantum=(
+                        int(quantum)
+                        if algoritmo is Algoritmo.ROUND_ROBIN and quantum is not None
+                        else None
+                    ),
+                )
+            )
+        aplicar = st.form_submit_button("Aplicar configuración")
+
+    if aplicar:
+        try:
+            estado.establecer_configuracion(construir_colas(especificaciones))
+        except ErrorDominio as error:
+            st.error(f"No se pudo aplicar la configuración: {error}.")
+        else:
+            st.success("Configuración de colas aplicada. Los resultados anteriores se descartaron.")
+
+    st.dataframe(_tabla_configuracion(estado), hide_index=True)
+
+
+def renderizar_ejecucion(estado: EstadoSesion) -> None:
+    """Ejecuta la modalidad elegida con la carga y la configuración vigentes."""
+
+    st.header("5. Ejecución")
+    try:
+        cantidad = estado.validar_cantidad()
+    except ErrorValidacion as error:
+        st.warning(f"No se puede ejecutar todavía: {error}.")
+        _renderizar_resultados(estado)
+        return
+
+    modalidad = st.selectbox(
+        "Modalidad de ejecución",
+        MODALIDADES,
+        key="modalidad_ejecucion",
+    )
+
+    quantum: int | None = None
+    if modalidad in ("Round Robin", "Comparación"):
+        valor_inicial = estado.quantum_comparacion if modalidad == "Comparación" else 2
+        quantum = int(
+            st.number_input(
+                "Quantum de la ejecución",
+                min_value=1,
+                step=1,
+                value=valor_inicial,
+                key=f"quantum_ejecucion_{modalidad}",
+            )
+        )
+        if modalidad == "Comparación":
+            estado.establecer_quantum_comparacion(quantum)
+
+    if st.button("Ejecutar simulación", key="ejecutar_simulacion"):
+        try:
+            _ejecutar(estado, modalidad, quantum)
+        except ErrorDominio as error:
+            st.error(f"No se pudo ejecutar la simulación: {error}.")
+        else:
+            st.success(f"Simulación ejecutada con {cantidad} procesos.")
+
+    _renderizar_resultados(estado)
 
 
 def _renderizar_cantidad(estado: EstadoSesion) -> None:
@@ -261,6 +389,66 @@ def _renderizar_edicion(estado: EstadoSesion) -> None:
                 st.success(f"Proceso {seleccionado} eliminado.")
 
 
+def _ejecutar(estado: EstadoSesion, modalidad: str, quantum: int | None) -> None:
+    """Llama al caso de uso correspondiente y conserva su resultado en la sesión."""
+
+    procesos = estado.procesos_ordenados
+    if modalidad == "MLQ":
+        resultado = ejecutar_algoritmo(
+            procesos,
+            Algoritmo.MLQ,
+            configuracion=estado.configuracion_colas,
+        )
+        estado.registrar_resultado_mlq(resultado)
+        return
+
+    if modalidad == "Comparación":
+        if quantum is None:
+            raise ErrorValidacion("la comparación requiere un quantum")
+        comparacion = comparar_algoritmos(procesos, quantum=quantum)
+        estado.registrar_comparacion(comparacion, quantum=quantum)
+        return
+
+    algoritmo = ALGORITMOS_POR_MODALIDAD[modalidad]
+    resultado = ejecutar_algoritmo(
+        procesos,
+        algoritmo,
+        quantum=quantum if algoritmo is Algoritmo.ROUND_ROBIN else None,
+    )
+    estado.registrar_resultado_individual(resultado)
+
+
+def _renderizar_resultados(estado: EstadoSesion) -> None:
+    """Muestra un resumen de los resultados vigentes sin dibujar el Gantt."""
+
+    if estado.resultado_individual is not None:
+        st.info("Última ejecución individual: " + _resumen_resultado(estado.resultado_individual))
+    if estado.resultado_mlq is not None:
+        st.info("Última ejecución MLQ: " + _resumen_resultado(estado.resultado_mlq))
+    if estado.comparacion is not None:
+        resumenes = " | ".join(
+            _resumen_resultado(resultado) for resultado in estado.comparacion.resultados
+        )
+        st.info(f"Comparación vigente con quantum {estado.quantum_comparacion}: {resumenes}")
+
+
+def _resumen_resultado(resultado: ResultadoSimulacion) -> str:
+    """Resume métricas ya calculadas por el motor."""
+
+    return (
+        f"{resultado.algoritmo.value} con {len(resultado.resultados)} procesos; "
+        f"espera promedio {resultado.promedio_espera:.2f}, "
+        f"retorno promedio {resultado.promedio_retorno:.2f}, "
+        f"utilización {resultado.utilizacion_cpu:.2f} %."
+    )
+
+
+def _prioridad_canonica(id_cola: str) -> int:
+    """Obtiene la prioridad que el dominio asigna por convención a una cola."""
+
+    return next(prioridad for prioridad, cola in ID_COLA_POR_PRIORIDAD.items() if cola == id_cola)
+
+
 def _cargar_catalogo(estado: EstadoSesion, ruta: Path) -> None:
     """Lee el catálogo y lo aplica al estado, informando cualquier rechazo."""
 
@@ -335,6 +523,23 @@ def _tabla_procesos(estado: EstadoSesion) -> pd.DataFrame:
                 "Ingreso": proceso.orden_ingreso,
             }
             for proceso in estado.procesos_ordenados
+        ]
+    )
+
+
+def _tabla_configuracion(estado: EstadoSesion) -> pd.DataFrame:
+    """Convierte la configuración MLQ en una tabla de presentación."""
+
+    return pd.DataFrame(
+        [
+            {
+                "Cola": cola.nombre,
+                "Prioridad": cola.prioridad_cola,
+                "Algoritmo": cola.algoritmo.value,
+                "Quantum": str(cola.quantum) if cola.quantum is not None else "no aplica",
+                "Tipos de cliente": ", ".join(tipo.value for tipo in cola.tipos_cliente),
+            }
+            for cola in estado.configuracion_colas
         ]
     )
 
