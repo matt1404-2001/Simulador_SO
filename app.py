@@ -7,6 +7,7 @@ from simulador.presentacion.componentes import (
     renderizar_configuracion,
     renderizar_ejecucion,
     renderizar_procesos,
+    renderizar_resultados,
     renderizar_resumen,
 )
 from simulador.presentacion.estado_sesion import obtener_estado
@@ -28,6 +29,7 @@ def main() -> None:
     renderizar_resumen(estado)
     renderizar_configuracion(estado)
     renderizar_ejecucion(estado)
+    renderizar_resultados(estado)
 
 
 main()

@@ -9,12 +9,19 @@ from typing import Protocol
 import pandas as pd
 import streamlit as st
 
-from simulador.aplicacion import comparar_algoritmos, ejecutar_algoritmo
+from simulador.aplicacion import Comparacion, comparar_algoritmos, ejecutar_algoritmo
 from simulador.dominio.enumeraciones import Algoritmo, Servicio
 from simulador.dominio.excepciones import ErrorDominio, ErrorValidacion
 from simulador.dominio.modelos import Cliente, ResultadoSimulacion
 from simulador.dominio.reglas import ID_COLA_POR_PRIORIDAD
-from simulador.infraestructura import cargar_clientes, cargar_procesos
+from simulador.infraestructura import (
+    cargar_clientes,
+    cargar_procesos,
+    generar_csv_metricas,
+    generar_csv_resultados,
+    generar_csv_traza,
+)
+from simulador.presentacion.avance import renderizar_avance
 from simulador.presentacion.estado_sesion import (
     NOMBRES_COLA,
     ColaEditable,
@@ -22,6 +29,7 @@ from simulador.presentacion.estado_sesion import (
     construir_colas,
     tipos_cliente_de_cola,
 )
+from simulador.presentacion.gantt import renderizar_gantt
 
 MODALIDADES = ("FIFO", "SJF", "Round Robin", "MLQ", "Comparación")
 ALGORITMOS_POR_MODALIDAD = {
@@ -181,7 +189,6 @@ def renderizar_ejecucion(estado: EstadoSesion) -> None:
         cantidad = estado.validar_cantidad()
     except ErrorValidacion as error:
         st.warning(f"No se puede ejecutar todavía: {error}.")
-        _renderizar_resultados(estado)
         return
 
     modalidad = st.selectbox(
@@ -212,8 +219,6 @@ def renderizar_ejecucion(estado: EstadoSesion) -> None:
             st.error(f"No se pudo ejecutar la simulación: {error}.")
         else:
             st.success(f"Simulación ejecutada con {cantidad} procesos.")
-
-    _renderizar_resultados(estado)
 
 
 def _renderizar_cantidad(estado: EstadoSesion) -> None:
@@ -418,8 +423,32 @@ def _ejecutar(estado: EstadoSesion, modalidad: str, quantum: int | None) -> None
     estado.registrar_resultado_individual(resultado)
 
 
-def _renderizar_resultados(estado: EstadoSesion) -> None:
-    """Muestra un resumen de los resultados vigentes sin dibujar el Gantt."""
+def renderizar_resultados(estado: EstadoSesion) -> None:
+    """Muestra Gantt, métricas, avance paso a paso y descargas vigentes."""
+
+    st.header("6. Resultados")
+    _renderizar_resumen_resultados(estado)
+
+    if estado.resultado_individual is not None:
+        _renderizar_resultado(estado.resultado_individual, clave="individual")
+    if estado.resultado_mlq is not None:
+        _renderizar_resultado(estado.resultado_mlq, clave="mlq")
+    if estado.comparacion is not None:
+        _renderizar_comparacion(estado.comparacion, quantum=estado.quantum_comparacion)
+
+
+def _renderizar_resumen_resultados(estado: EstadoSesion) -> None:
+    """Anuncia qué resultados siguen vigentes después del último rerun."""
+
+    if (
+        estado.resultado_individual is None
+        and estado.resultado_mlq is None
+        and estado.comparacion is None
+    ):
+        st.info(
+            "Ejecute una simulación para consultar el Gantt, las métricas y el avance paso a paso."
+        )
+        return
 
     if estado.resultado_individual is not None:
         st.info("Última ejecución individual: " + _resumen_resultado(estado.resultado_individual))
@@ -430,6 +459,113 @@ def _renderizar_resultados(estado: EstadoSesion) -> None:
             _resumen_resultado(resultado) for resultado in estado.comparacion.resultados
         )
         st.info(f"Comparación vigente con quantum {estado.quantum_comparacion}: {resumenes}")
+
+
+def _renderizar_resultado(resultado: ResultadoSimulacion, *, clave: str) -> None:
+    """Presenta una ejecución individual o MLQ con todos sus detalles."""
+
+    st.subheader(f"{resultado.algoritmo.value} con {len(resultado.resultados)} procesos")
+    _renderizar_metricas(resultado)
+    renderizar_gantt(resultado)
+
+    st.markdown("**Resultados por proceso**")
+    st.dataframe(_tabla_resultados(resultado), hide_index=True)
+
+    renderizar_avance(resultado, clave=clave)
+    _renderizar_descargas(resultado, clave=clave)
+
+
+def _renderizar_metricas(resultado: ResultadoSimulacion) -> None:
+    """Muestra las métricas globales ya calculadas por el dominio."""
+
+    columnas = st.columns(5)
+    columnas[0].metric("Espera promedio", f"{resultado.promedio_espera:.2f}")
+    columnas[1].metric("Retorno promedio", f"{resultado.promedio_retorno:.2f}")
+    columnas[2].metric("CPU ocupado", resultado.tiempo_cpu_ocupado)
+    columnas[3].metric("CPU inactivo", resultado.tiempo_cpu_inactivo)
+    columnas[4].metric("Utilización", f"{resultado.utilizacion_cpu:.2f} %")
+
+
+def _renderizar_comparacion(comparacion: Comparacion, *, quantum: int) -> None:
+    """Resume los algoritmos comparados y permite abrir cada detalle."""
+
+    st.subheader(f"Comparación de algoritmos con quantum {quantum}")
+    st.dataframe(_tabla_comparacion(comparacion), hide_index=True)
+
+    for resultado in comparacion.resultados:
+        clave = f"comparacion_{resultado.algoritmo.name.lower()}"
+        with st.expander(f"Detalle de {resultado.algoritmo.value}"):
+            _renderizar_metricas(resultado)
+            renderizar_gantt(resultado)
+            st.dataframe(_tabla_resultados(resultado), hide_index=True)
+            renderizar_avance(resultado, clave=clave)
+            _renderizar_descargas(resultado, clave=clave)
+
+
+def _renderizar_descargas(resultado: ResultadoSimulacion, *, clave: str) -> None:
+    """Ofrece la traza, los resultados por proceso y las métricas en CSV."""
+
+    sufijo = resultado.algoritmo.name.lower()
+    st.markdown("**Descarga de resultados**")
+    columnas = st.columns(3)
+    columnas[0].download_button(
+        "Traza en CSV",
+        data=generar_csv_traza(resultado),
+        file_name=f"traza_{sufijo}.csv",
+        mime="text/csv",
+        key=f"descarga_traza_{clave}",
+    )
+    columnas[1].download_button(
+        "Resultados por proceso",
+        data=generar_csv_resultados(resultado),
+        file_name=f"resultados_{sufijo}.csv",
+        mime="text/csv",
+        key=f"descarga_resultados_{clave}",
+    )
+    columnas[2].download_button(
+        "Métricas en CSV",
+        data=generar_csv_metricas(resultado),
+        file_name=f"metricas_{sufijo}.csv",
+        mime="text/csv",
+        key=f"descarga_metricas_{clave}",
+    )
+
+
+def _tabla_resultados(resultado: ResultadoSimulacion) -> pd.DataFrame:
+    """Convierte los resultados por proceso en una tabla de presentación."""
+
+    return pd.DataFrame(
+        [
+            {
+                "Proceso": item.id_proceso,
+                "Cola": item.id_cola or "no aplica",
+                "Llegada": item.tiempo_llegada,
+                "Ráfaga": item.rafaga,
+                "Finalización": item.tiempo_finalizacion,
+                "Espera": item.tiempo_espera,
+                "Retorno": item.tiempo_retorno,
+            }
+            for item in resultado.resultados
+        ]
+    )
+
+
+def _tabla_comparacion(comparacion: Comparacion) -> pd.DataFrame:
+    """Resume las métricas de FIFO, SJF y Round Robin en una sola tabla."""
+
+    return pd.DataFrame(
+        [
+            {
+                "Algoritmo": resultado.algoritmo.value,
+                "Espera promedio": round(resultado.promedio_espera, 2),
+                "Retorno promedio": round(resultado.promedio_retorno, 2),
+                "CPU ocupado": resultado.tiempo_cpu_ocupado,
+                "CPU inactivo": resultado.tiempo_cpu_inactivo,
+                "Utilización (%)": round(resultado.utilizacion_cpu, 2),
+            }
+            for resultado in comparacion.resultados
+        ]
+    )
 
 
 def _resumen_resultado(resultado: ResultadoSimulacion) -> str:
