@@ -1,0 +1,9 @@
+id_proceso,id_cliente,servicio,cantidad_gestiones,tiempo_llegada,rafaga
+P001,C001,Internet,2,0,5
+P002,C003,Cable,1,0,3
+P003,C002,Hosting,3,0,7
+P004,C004,Telefonía,2,0,4
+P005,C005,Internet,1,0,6
+P006,C006,Cable,1,0,2
+P007,C001,Hosting,1,0,3
+P008,C002,Telefonía,2,0,4

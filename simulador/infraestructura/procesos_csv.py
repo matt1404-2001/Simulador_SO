@@ -29,15 +29,20 @@ _SERVICIOS_POR_NOMBRE = {servicio.value: servicio for servicio in Servicio}
 def cargar_procesos(
     ruta: str | Path,
     clientes: Iterable[Cliente],
+    *,
+    limite: int | None = None,
 ) -> tuple[Proceso, ...]:
     """Carga los tiquetes y deriva de cada cliente su prioridad y cola.
 
     El archivo no puede declarar prioridad ni cola: ambas se obtienen de las
     reglas del tipo de cliente. El orden de las filas define `orden_ingreso`.
+    Con `limite` se cargan solo las primeras filas, que es como se planifican los
+    primeros N procesos de un archivo más largo.
     """
 
+    limite_validado = _validar_limite(limite)
     indice_clientes = {cliente.id_cliente: cliente for cliente in clientes}
-    filas = leer_filas(ruta, COLUMNAS_PROCESOS, "procesos")
+    filas = leer_filas(ruta, COLUMNAS_PROCESOS, "procesos", limite_validado)
     procesos: list[Proceso] = []
     identificadores: set[str] = set()
 
@@ -92,6 +97,18 @@ def cargar_procesos(
         procesos.append(proceso)
 
     return tuple(procesos)
+
+
+def _validar_limite(limite: int | None) -> int | None:
+    """Exige un límite entero positivo o `None` cuando no hay recorte."""
+
+    if limite is None:
+        return None
+    if isinstance(limite, bool) or not isinstance(limite, int):
+        raise ErrorValidacion("limite debe ser un número entero")
+    if limite < 1:
+        raise ErrorValidacion("limite debe ser mayor o igual que 1")
+    return limite
 
 
 def _leer_servicio(valor: str, numero: int) -> Servicio:

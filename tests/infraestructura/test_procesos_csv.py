@@ -110,3 +110,49 @@ def test_rechaza_servicio_desconocido(
 
     with pytest.raises(ErrorValidacion, match="fila 2, campo servicio"):
         cargar_procesos(ruta, clientes_de_ejemplo)
+
+
+def test_limite_carga_solo_las_primeras_filas(
+    clientes_de_ejemplo: tuple[Cliente, ...],
+) -> None:
+    procesos = cargar_procesos(RUTA_DATOS / "procesos_ejemplo.csv", clientes_de_ejemplo, limite=3)
+
+    assert [proceso.id_proceso for proceso in procesos] == ["P001", "P002", "P003"]
+    assert [proceso.orden_ingreso for proceso in procesos] == [0, 1, 2]
+
+
+def test_limite_ignora_las_filas_posteriores(
+    tmp_path: Path, clientes_de_ejemplo: tuple[Cliente, ...]
+) -> None:
+    contenido = (
+        f"{CABECERA}\n"
+        "P001,C001,Internet,2,0,5\n"
+        "P002,C002,Hosting,1,2,3\n"
+        "P003,C003,Cable,1,4,no-es-un-entero\n"
+    )
+    ruta = _escribir(tmp_path, contenido)
+
+    procesos = cargar_procesos(ruta, clientes_de_ejemplo, limite=2)
+
+    assert [proceso.id_proceso for proceso in procesos] == ["P001", "P002"]
+
+
+def test_limite_mayor_que_las_filas_carga_todo(
+    clientes_de_ejemplo: tuple[Cliente, ...],
+) -> None:
+    procesos = cargar_procesos(
+        RUTA_DATOS / "procesos_ejemplo.csv",
+        clientes_de_ejemplo,
+        limite=50,
+    )
+
+    assert len(procesos) == 8
+
+
+@pytest.mark.parametrize("limite", [0, -2, 1.5, True, "2"])
+def test_rechaza_un_limite_invalido(
+    limite: object,
+    clientes_de_ejemplo: tuple[Cliente, ...],
+) -> None:
+    with pytest.raises(ErrorValidacion, match="limite"):
+        cargar_procesos(RUTA_DATOS / "procesos_ejemplo.csv", clientes_de_ejemplo, limite=limite)

@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from simulador.dominio import Cliente, ErrorValidacion, Proceso, Servicio, TipoCliente
+from simulador.aplicacion import ejecutar_algoritmo
+from simulador.dominio import (
+    Algoritmo,
+    Cliente,
+    ErrorValidacion,
+    Proceso,
+    Servicio,
+    TipoCliente,
+)
 from simulador.infraestructura import cargar_clientes
 from simulador.presentacion.estado_sesion import (
     CLAVE_ESTADO_SESION,
@@ -267,6 +275,52 @@ def test_procesos_ordenados_usan_el_orden_de_ingreso(estado: EstadoSesion) -> No
 
     assert [proceso.id_proceso for proceso in estado.procesos_ordenados] == ["P002", "P001"]
     assert [proceso.id_proceso for proceso in estado.procesos] == ["P002", "P001"]
+
+
+def test_recortar_a_cantidad_conserva_los_primeros_por_ingreso(estado: EstadoSesion) -> None:
+    _agregar(estado, "P001")
+    _agregar(estado, "P002")
+    _agregar(estado, "P003")
+    estado.establecer_cantidad_solicitada(2)
+
+    sobrantes = estado.recortar_a_cantidad()
+
+    assert [proceso.id_proceso for proceso in estado.procesos] == ["P001", "P002"]
+    assert [proceso.id_proceso for proceso in sobrantes] == ["P003"]
+    assert estado.validar_cantidad() == 2
+
+
+def test_recortar_a_cantidad_no_modifica_una_carga_que_cabe(estado: EstadoSesion) -> None:
+    _agregar(estado, "P001")
+    estado.establecer_cantidad_solicitada(3)
+
+    assert estado.recortar_a_cantidad() == ()
+    assert [proceso.id_proceso for proceso in estado.procesos] == ["P001"]
+
+
+def test_recortar_a_cantidad_exige_n(estado: EstadoSesion) -> None:
+    _agregar(estado, "P001")
+
+    with pytest.raises(ErrorValidacion, match="indique la cantidad N"):
+        estado.recortar_a_cantidad()
+
+
+def test_recortar_a_cantidad_descarta_los_resultados_y_conserva_el_resto(
+    estado: EstadoSesion, clientes: tuple[Cliente, ...]
+) -> None:
+    _agregar(estado, "P001")
+    _agregar(estado, "P002")
+    estado.establecer_cantidad_solicitada(1)
+    resultado = ejecutar_algoritmo(estado.procesos_ordenados, Algoritmo.FIFO)
+    estado.registrar_resultado_individual(resultado)
+    configuracion = estado.configuracion_colas
+
+    estado.recortar_a_cantidad()
+
+    assert estado.resultado_individual is None
+    assert estado.clientes == clientes
+    assert estado.configuracion_colas == configuracion
+    assert [proceso.id_proceso for proceso in estado.procesos] == ["P001"]
 
 
 def test_siguiente_id_proceso_evita_identificadores_usados(estado: EstadoSesion) -> None:

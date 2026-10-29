@@ -57,11 +57,17 @@ def renderizar_catalogo(estado: EstadoSesion) -> None:
     st.header("1. Catálogo de clientes")
     st.caption("Solo un cliente activo del catálogo puede generar tiquetes de proceso.")
 
-    columnas = st.columns(2)
-    with columnas[0]:
+    if st.button(
+        "Preparar demostración",
+        key="preparar_demostracion",
+        type="primary",
+        help="Carga el catálogo, los ocho procesos de ejemplo y establece N.",
+    ):
+        _preparar_demostracion(estado)
+
+    with st.expander("Usar un catálogo propio o cargar solo el ejemplo"):
         if st.button("Cargar catálogo de ejemplo", key="catalogo_ejemplo"):
             _cargar_catalogo(estado, RUTA_DATOS / "clientes.csv")
-    with columnas[1]:
         archivo = st.file_uploader("Archivo de clientes en CSV", type=["csv"], key="clientes_csv")
         if archivo is not None and st.button("Importar catálogo", key="importar_clientes"):
             with _archivo_temporal(archivo) as ruta:
@@ -71,22 +77,57 @@ def renderizar_catalogo(estado: EstadoSesion) -> None:
         st.info("Cargue el catálogo de ejemplo o importe un archivo de clientes para continuar.")
         return
 
-    st.caption(f"Clientes en el catálogo: {len(estado.clientes)}")
-    st.dataframe(_tabla_clientes(estado), hide_index=True)
+    with st.expander(f"Ver catálogo cargado ({len(estado.clientes)} clientes)"):
+        st.dataframe(_tabla_clientes(estado), hide_index=True)
 
 
 def renderizar_procesos(estado: EstadoSesion) -> None:
-    """Muestra la cantidad N, la importación y la edición manual de procesos."""
+    """Muestra la cantidad N, la importación, la edición y el ajuste de la carga."""
 
     st.header("2. Carga de procesos")
-    if st.button("Reiniciar carga", key="reiniciar_carga"):
-        estado.reiniciar()
-        st.success("Se limpiaron los procesos y N. El catálogo de clientes se conserva.")
     _renderizar_cantidad(estado)
-    _renderizar_importacion(estado)
-    _renderizar_alta(estado)
+    with st.expander("Importar procesos", expanded=not estado.procesos):
+        _renderizar_importacion(estado)
+    with st.expander("Agregar un proceso manualmente"):
+        _renderizar_alta(estado)
     if estado.procesos:
-        _renderizar_edicion(estado)
+        with st.expander("Editar o eliminar un proceso"):
+            _renderizar_edicion(estado)
+
+    # El ajuste y el reinicio se dibujan después de importar o editar para que
+    # reflejen la carga vigente en la misma ejecución de la página.
+    _renderizar_ajuste(estado)
+
+
+def _renderizar_ajuste(estado: EstadoSesion) -> None:
+    """Recorta la carga a N o la reinicia con los cambios de la sección ya aplicados."""
+
+    cantidad = estado.cantidad_solicitada
+    if cantidad is not None and len(estado.procesos) > cantidad:
+        exceso = len(estado.procesos) - cantidad
+        st.caption(
+            f"La carga tiene {len(estado.procesos)} procesos y N es {cantidad}. "
+            f"Ajustar conserva los primeros {cantidad} por orden de ingreso y quita {exceso}."
+        )
+        if st.button(f"Ajustar la carga a N = {cantidad}", key="ajustar_carga_a_n"):
+            sobrantes = estado.recortar_a_cantidad()
+            st.success(
+                "Se quitaron: " + ", ".join(proceso.id_proceso for proceso in sobrantes) + "."
+            )
+
+    if (estado.procesos or estado.cantidad_solicitada is not None) and st.button(
+        "Reiniciar carga", key="reiniciar_carga"
+    ):
+        st.session_state["confirmar_reinicio_carga"] = True
+    if st.session_state.get("confirmar_reinicio_carga"):
+        st.warning("Esta acción borrará los procesos cargados y el valor de N.")
+        columnas = st.columns(2)
+        if columnas[0].button("Confirmar reinicio", key="confirmar_reinicio"):
+            estado.reiniciar()
+            st.session_state["confirmar_reinicio_carga"] = False
+            st.success("Se limpiaron los procesos y N. El catálogo de clientes se conserva.")
+        if columnas[1].button("Cancelar", key="cancelar_reinicio"):
+            st.session_state["confirmar_reinicio_carga"] = False
 
 
 def renderizar_resumen(estado: EstadoSesion) -> None:
@@ -117,12 +158,13 @@ def renderizar_configuracion(estado: EstadoSesion) -> None:
 
     st.header("4. Configuración de colas MLQ")
     st.caption(
-        "Cada proceso entra a la cola derivada de su tipo de cliente. Menor prioridad se "
-        "atiende primero; si dos colas empatan, se usa el orden en que aparecen."
+        "Cada proceso entra a la cola derivada de su tipo de cliente. El número menor "
+        "representa mayor prioridad; si dos colas empatan, se usa el orden mostrado."
     )
+    st.dataframe(_tabla_configuracion(estado), hide_index=True)
 
     actuales = {cola.id_cola: cola for cola in estado.configuracion_colas}
-    with st.form("formulario_configuracion"):
+    with st.expander("Editar configuración de colas"), st.form("formulario_configuracion"):
         especificaciones: list[ColaEditable] = []
         for id_cola, nombre in NOMBRES_COLA.items():
             actual = actuales.get(id_cola)
@@ -168,7 +210,7 @@ def renderizar_configuracion(estado: EstadoSesion) -> None:
                     ),
                 )
             )
-        aplicar = st.form_submit_button("Aplicar configuración")
+        aplicar = st.form_submit_button("Guardar configuración")
 
     if aplicar:
         try:
@@ -177,8 +219,6 @@ def renderizar_configuracion(estado: EstadoSesion) -> None:
             st.error(f"No se pudo aplicar la configuración: {error}.")
         else:
             st.success("Configuración de colas aplicada. Los resultados anteriores se descartaron.")
-
-    st.dataframe(_tabla_configuracion(estado), hide_index=True)
 
 
 def renderizar_ejecucion(estado: EstadoSesion) -> None:
@@ -238,7 +278,7 @@ def _renderizar_cantidad(estado: EstadoSesion) -> None:
                 "N es la cantidad de procesos válidos que debe contener la carga para ejecutar "
                 "la simulación."
             )
-            aplicar = st.form_submit_button("Aplicar N")
+            aplicar = st.form_submit_button("Confirmar cantidad")
         if aplicar:
             try:
                 estado.establecer_cantidad_solicitada(int(cantidad))
@@ -251,10 +291,20 @@ def _renderizar_cantidad(estado: EstadoSesion) -> None:
 def _renderizar_importacion(estado: EstadoSesion) -> None:
     """Importa procesos desde el archivo de ejemplo o uno subido por el usuario."""
 
-    st.subheader("Importar procesos")
     if not estado.clientes:
         st.info("Importe primero el catálogo de clientes.")
         return
+
+    cantidad = estado.cantidad_solicitada
+    if cantidad is None:
+        st.caption(
+            "Sin N confirmada se cargan todas las filas del archivo y N se ajusta a esa cantidad."
+        )
+    else:
+        st.caption(
+            f"Se cargarán solo los primeros {cantidad} procesos del archivo, en el orden de "
+            f"sus filas, porque N es {cantidad}."
+        )
 
     columnas = st.columns(2)
     with columnas[0]:
@@ -270,7 +320,6 @@ def _renderizar_importacion(estado: EstadoSesion) -> None:
 def _renderizar_alta(estado: EstadoSesion) -> None:
     """Formulario para agregar un tiquete manualmente."""
 
-    st.subheader("Agregar un proceso")
     opciones = _opciones_clientes(estado.clientes, solo_activos=True)
     if not opciones:
         st.info("El catálogo no tiene clientes activos; revise el archivo de clientes.")
@@ -319,7 +368,6 @@ def _renderizar_alta(estado: EstadoSesion) -> None:
 def _renderizar_edicion(estado: EstadoSesion) -> None:
     """Permite editar los datos de un proceso o eliminarlo de la carga."""
 
-    st.subheader("Editar o eliminar un proceso")
     identificadores = [proceso.id_proceso for proceso in estado.procesos_ordenados]
     seleccionado = st.selectbox("Proceso", identificadores, key="proceso_seleccionado")
     proceso = estado.buscar_proceso(seleccionado)
@@ -479,10 +527,10 @@ def _renderizar_metricas(resultado: ResultadoSimulacion) -> None:
     """Muestra las métricas globales ya calculadas por el dominio."""
 
     columnas = st.columns(5)
-    columnas[0].metric("Espera promedio", f"{resultado.promedio_espera:.2f}")
-    columnas[1].metric("Retorno promedio", f"{resultado.promedio_retorno:.2f}")
-    columnas[2].metric("CPU ocupado", resultado.tiempo_cpu_ocupado)
-    columnas[3].metric("CPU inactivo", resultado.tiempo_cpu_inactivo)
+    columnas[0].metric("Espera promedio", f"{resultado.promedio_espera:.2f} u.t.")
+    columnas[1].metric("Retorno promedio", f"{resultado.promedio_retorno:.2f} u.t.")
+    columnas[2].metric("CPU ocupado", f"{resultado.tiempo_cpu_ocupado} u.t.")
+    columnas[3].metric("CPU inactivo", f"{resultado.tiempo_cpu_inactivo} u.t.")
     columnas[4].metric("Utilización", f"{resultado.utilizacion_cpu:.2f} %")
 
 
@@ -597,16 +645,43 @@ def _cargar_catalogo(estado: EstadoSesion, ruta: Path) -> None:
         st.success(f"Catálogo cargado con {len(clientes)} clientes.")
 
 
-def _importar_procesos(estado: EstadoSesion, ruta: Path) -> None:
-    """Lee los procesos, los valida contra el catálogo y reemplaza la carga."""
+def _preparar_demostracion(estado: EstadoSesion) -> None:
+    """Prepara en una acción la carga de ejemplo lista para ejecutar."""
 
     try:
-        procesos = cargar_procesos(ruta, estado.clientes)
+        clientes = cargar_clientes(RUTA_DATOS / "clientes.csv")
+        estado.cargar_catalogo(clientes)
+        procesos = cargar_procesos(RUTA_DATOS / "procesos_ejemplo.csv", estado.clientes)
+        estado.importar_procesos(procesos)
+        estado.establecer_cantidad_solicitada(len(procesos))
+    except ErrorValidacion as error:
+        st.error(f"No se pudo preparar la demostración: {error}.")
+    else:
+        st.success("Demostración preparada con 6 clientes y 8 procesos.")
+
+
+def _importar_procesos(estado: EstadoSesion, ruta: Path) -> None:
+    """Lee los procesos, los valida contra el catálogo y respeta la cantidad N."""
+
+    cantidad = estado.cantidad_solicitada
+    try:
+        procesos = cargar_procesos(ruta, estado.clientes, limite=cantidad)
         estado.importar_procesos(procesos)
     except ErrorValidacion as error:
         st.error(f"No se pudieron importar los procesos: {error}.")
+        return
+
+    st.success(f"Se importaron {len(procesos)} procesos.")
+    if cantidad is None:
+        estado.establecer_cantidad_solicitada(len(procesos))
+        st.info(f"N quedó en {len(procesos)} para coincidir con la carga.")
+    elif len(procesos) < cantidad:
+        st.warning(
+            f"El archivo tiene {len(procesos)} procesos y N es {cantidad}; "
+            "ajuste N o cargue un archivo con más filas."
+        )
     else:
-        st.success(f"Se importaron {len(procesos)} procesos.")
+        st.info(f"Se usaron los primeros {cantidad} procesos del archivo porque N es {cantidad}.")
 
 
 def _opciones_clientes(

@@ -11,11 +11,14 @@ def leer_filas(
     ruta: str | Path,
     columnas: Sequence[str],
     descripcion: str,
+    limite: int | None = None,
 ) -> list[tuple[int, dict[str, str]]]:
     """Lee un CSV UTF-8 y devuelve cada fila con su número de línea.
 
     El encabezado debe contener exactamente las columnas esperadas, en cualquier
-    orden, y cada fila debe tener la misma cantidad de campos.
+    orden, y cada fila debe tener la misma cantidad de campos. Con `limite` se
+    dejan de leer las filas posteriores, de modo que una fila inválida al final
+    del archivo no impide cargar las primeras.
     """
 
     ruta_archivo = Path(ruta)
@@ -29,6 +32,8 @@ def leer_filas(
 
             filas: list[tuple[int, dict[str, str]]] = []
             for fila in lector:
+                if limite is not None and len(filas) >= limite:
+                    break
                 numero = lector.line_num
                 if None in fila or any(fila.get(columna) is None for columna in columnas):
                     raise ErrorValidacion(

@@ -285,6 +285,29 @@ class EstadoSesion:
             )
         return self.cantidad_solicitada
 
+    def recortar_a_cantidad(self) -> tuple[Proceso, ...]:
+        """Conserva los primeros N procesos y devuelve los que quedaron fuera.
+
+        El recorte respeta el orden de ingreso, de modo que se conservan los
+        procesos que se cargaron primero, igual que se leen las filas de un
+        archivo. Si la carga ya cabe en N no se modifica nada.
+        """
+
+        if self.cantidad_solicitada is None:
+            raise ErrorValidacion("indique la cantidad N de procesos antes de recortar la carga")
+
+        ordenados = sorted(
+            self.procesos,
+            key=lambda proceso: (proceso.orden_ingreso, proceso.id_proceso),
+        )
+        sobrantes = ordenados[self.cantidad_solicitada :]
+        if not sobrantes:
+            return ()
+
+        self.procesos = ordenados[: self.cantidad_solicitada]
+        self._invalidar_resultados()
+        return tuple(sobrantes)
+
     def establecer_configuracion(
         self, colas: Iterable[ConfiguracionCola]
     ) -> tuple[ConfiguracionCola, ...]:

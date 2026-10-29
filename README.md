@@ -53,10 +53,17 @@ Flujo recomendado:
 
 1. Cargar el catálogo de ejemplo o importar un archivo de clientes.
 2. Cargar los procesos de ejemplo o importarlos desde CSV.
-3. Indicar `N = 8` y aplicar el valor.
+3. Revisar `N`: si está vacío se completa con la cantidad de filas importadas; si
+   ya tiene valor, la importación carga solo las primeras `N`.
 4. Revisar la configuración de las cuatro colas MLQ.
 5. Elegir FIFO, SJF, Round Robin, MLQ o Comparación y ejecutar.
 6. Consultar el Gantt, el avance paso a paso, las métricas y las descargas CSV.
+
+Si `N` está confirmada y el archivo trae más filas, la importación carga solo los
+primeros `N` procesos, en el orden de las filas, y lo informa. Si la carga ya
+quedó desalineada con `N` (por ejemplo, tras agregar procesos a mano), el botón
+"Ajustar la carga a N" conserva los primeros `N` por orden de ingreso y quita el
+resto de una sola vez, sin borrar proceso por proceso.
 
 Para ejecutar en un servidor sin abrir el navegador automáticamente:
 
@@ -153,6 +160,9 @@ Reglas:
 - `rafaga` es un entero mayor que 0.
 - La prioridad, la cola y el orden de ingreso se derivan del cliente y del orden
   de las filas. El archivo no puede declarar esas columnas.
+- Si `N` está confirmada, la importación lee solo las primeras `N` filas del
+  archivo; las siguientes no se validan ni se cargan. El orden de las filas
+  define cuáles entran.
 
 ### Datos de demostración
 
